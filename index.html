@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#111827">
+  <meta name="description" content="A personal disposable inbox client powered by Mail.tm.">
+  <link rel="manifest" href="manifest.json">
+  <title>QuickInbox — Temporary Email</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0b1220; --panel:#111c2e; --panel2:#1b2940; --text:#f8fafc; --muted:#a7b4c8; --accent:#7c9cff; --line:#2b3b54; --danger:#ff9c9c; }
+    * { box-sizing:border-box; }
+    body { margin:0; background:linear-gradient(160deg,#0b1220,#101b2d); color:var(--text); font:16px/1.45 system-ui,-apple-system,Segoe UI,sans-serif; min-height:100vh; }
+    main { width:min(760px,100%); margin:auto; padding:22px 16px 36px; }
+    header { display:flex; align-items:center; gap:12px; margin-bottom:22px; }
+    .logo { width:44px;height:44px;border-radius:14px;display:grid;place-items:center;background:#263b69;font-size:23px; }
+    h1 { font-size:22px; margin:0; } .sub { color:var(--muted);font-size:13px; }
+    .card { background:rgba(17,28,46,.96); border:1px solid var(--line); border-radius:18px; padding:17px; margin:14px 0; box-shadow:0 8px 30px #0002; }
+    .label { color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.09em;font-weight:700; }
+    #address { overflow-wrap:anywhere;font-size:17px;font-weight:700;margin:8px 0 14px; }
+    .actions { display:flex;flex-wrap:wrap;gap:9px; }
+    button { border:1px solid #425675;border-radius:12px;padding:11px 14px;background:var(--panel2);color:var(--text);font-weight:650;font-size:14px;cursor:pointer; }
+    button.primary { background:var(--accent);color:#10182a;border-color:transparent; }
+    button:disabled { opacity:.55;cursor:wait; }
+    #status { color:var(--muted);font-size:13px;min-height:20px;margin-top:12px; }
+    #status.error { color:var(--danger); }
+    .inbox-head { display:flex;align-items:center;justify-content:space-between;gap:10px; }
+    h2 {font-size:17px;margin:0;}
+    #messages { margin-top:13px;display:grid;gap:9px; }
+    .message { text-align:left;width:100%;display:block;background:#152238;border-color:#2b3b54;padding:13px; }
+    .message strong { display:block;overflow-wrap:anywhere;margin-bottom:4px; }
+    .message .from { color:var(--muted);font-size:12px;overflow-wrap:anywhere; }
+    .message .intro { margin-top:7px;font-size:13px;color:#d2dced; }
+    .empty { text-align:center;padding:25px 10px;color:var(--muted); }
+    #reader { display:none; }
+    #reader h2 { margin:9px 0;overflow-wrap:anywhere; }
+    #bodyText { white-space:pre-wrap;overflow-wrap:anywhere;background:#0c1524;border-radius:12px;padding:13px;min-height:80px;font-size:14px; }
+    .notice { color:var(--muted);font-size:12px;line-height:1.5; }
+    a {color:#a9bdff;}
+    footer { padding:12px 4px;color:var(--muted);font-size:12px; }
+    @media(min-width:600px){ main{padding-top:32px}.card{padding:21px} }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div class="logo" aria-hidden="true">✉</div>
+    <div><h1>QuickInbox</h1><div class="sub">Personal temporary email inbox</div></div>
+  </header>
+
+  <section class="card">
+    <div class="label">Your temporary email address</div>
+    <div id="address">No inbox created yet</div>
+    <div class="actions">
+      <button id="createBtn" class="primary">＋ Create inbox</button>
+      <button id="copyBtn" disabled>Copy address</button>
+      <button id="refreshBtn" disabled>↻ Refresh</button>
+      <button id="deleteBtn" disabled>Delete inbox</button>
+    </div>
+    <div id="status" role="status">Create an inbox to get started.</div>
+  </section>
+
+  <section class="card">
+    <div class="inbox-head"><h2>Inbox</h2><span id="count" class="sub">0 messages</span></div>
+    <div id="messages"><div class="empty">Your inbox is empty.</div></div>
+  </section>
+
+  <section class="card" id="reader">
+    <button id="backBtn">← Back to inbox</button>
+    <h2 id="mailSubject"></h2>
+    <div id="mailMeta" class="sub"></div>
+    <div id="bodyText"></div>
+  </section>
+
+  <section class="card notice">
+    <strong>Privacy and limitations</strong><br>
+    This client uses the free <a href="https://mail.tm/" target="_blank" rel="noreferrer">Mail.tm</a> service and its API. The provider controls availability, supported domains, retention and filtering. Do not use temporary inboxes for banking, password recovery, or important accounts. Your inbox credentials are saved in this browser's local storage so you can reopen the inbox on this device. Anyone with access to this browser profile may be able to access it. This app receives email only; it does not send email.
+  </section>
+  <footer>Powered by <a href="https://docs.mail.tm/" target="_blank" rel="noreferrer">Mail.tm API</a>. This is an independent personal project and is not affiliated with Mail.tm.</footer>
+</main>
+
+<script>
+(() => {
+  const API = 'https://api.mail.tm';
+  const $ = id => document.getElementById(id);
+  let account = null;
+  let pollTimer = null;
+  let busy = false;
+
+  function status(message, error=false) {
+    $('status').textContent = message;
+    $('status').className = error ? 'error' : '';
+  }
+  function setBusy(value) {
+    busy = value;
+    $('createBtn').disabled = value;
+    $('refreshBtn').disabled = value || !account;
+    $('deleteBtn').disabled = value || !account;
+  }
+  async function request(path, options={}) {
+    const headers = Object.assign({'Accept':'application/json'}, options.headers || {});
+    if (options.body) headers['Content-Type'] = 'application/json';
+    if (account && account.token && !path.endsWith('/token') && !path.endsWith('/accounts')) {
+      headers['Authorization'] = 'Bearer ' + account.token;
+    }
+    const response = await fetch(API + path, {...options, headers});
+    if (!response.ok) {
+      let message = `Request failed (${response.status})`;
+      try {
+        const data = await response.json();
+        if (data['hydra:description']) message = data['hydra:description'];
+        else if (data.message) message = data.message;
+      } catch (_) {}
+      throw new Error(message);
+    }
+    if (response.status === 204) return null;
+    return response.json();
+  }
+  function saveAccount() {
+    if (account) localStorage.setItem('quickinbox-account', JSON.stringify(account));
+    else localStorage.removeItem('quickinbox-account');
+  }
+  function updateControls() {
+    $('address').textContent = account ? account.address : 'No inbox created yet';
+    $('copyBtn').disabled = !account;
+    $('refreshBtn').disabled = !account || busy;
+    $('deleteBtn').disabled = !account || busy;
+  }
+  function stopPolling() {
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = null;
+  }
+  function startPolling() {
+    stopPolling();
+    pollTimer = setInterval(() => { if (account && !busy) loadMessages(true); }, 15000);
+  }
+  function randomName() {
+    return 'inbox' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+  }
+  async function createInbox() {
+    if (busy) return;
+    setBusy(true);
+    status('Finding an available email domain…');
+    try {
+      const data = await request('/domains');
+      const domains = (data['hydra:member'] || []).filter(d => d.isActive && d.domain);
+      if (!domains.length) throw new Error('No active email domains are available right now.');
+      let created = null, lastError = null;
+      for (let i = 0; i < 4 && !created; i++) {
+        const domain = domains[Math.floor(Math.random() * domains.length)].domain;
+        const address = randomName() + '@' + domain;
+        const password = Array.from(crypto.getRandomValues(new Uint8Array(24)), b => b.toString(16).padStart(2,'0')).join('');
+        try {
+          const accountInfo = await request('/accounts', {method:'POST', body:JSON.stringify({address,password})});
+          const auth = await request('/token', {method:'POST', body:JSON.stringify({address,password})});
+          created = {address,password,token:auth.token,id:accountInfo.id || null,createdAt:Date.now()};
+        } catch (e) { lastError = e; }
+      }
+      if (!created) throw lastError || new Error('Could not create an inbox. Try again.');
+      account = created;
+      saveAccount();
+      updateControls();
+      $('messages').innerHTML = '<div class="empty">Inbox created. Waiting for messages…</div>';
+      $('count').textContent = '0 messages';
+      status('Inbox ready. New messages are checked every 15 seconds.');
+      startPolling();
+      await loadMessages(true);
+    } catch (e) {
+      status(e.message + ' Check your connection and try again.', true);
+    } finally { setBusy(false); updateControls(); }
+  }
+  async function loadMessages(quiet=false) {
+    if (!account || busy) return;
+    try {
+      if (!quiet) status('Refreshing messages…');
+      const data = await request('/messages');
+      const items = data['hydra:member'] || [];
+      $('count').textContent = `${items.length} message${items.length === 1 ? '' : 's'}`;
+      $('messages').replaceChildren();
+      if (!items.length) {
+        const empty = document.createElement('div');
+        empty.className = 'empty'; empty.textContent = 'No messages yet. This inbox refreshes automatically.';
+        $('messages').append(empty);
+      }
+      for (const item of items) {
+        const btn = document.createElement('button');
+        btn.className = 'message';
+        const subject = document.createElement('strong');
+        subject.textContent = item.subject || '(No subject)';
+        const from = document.createElement('div');
+        from.className = 'from';
+        from.textContent = `${item.from?.name ? item.from.name + ' ' : ''}<${item.from?.address || 'unknown sender'}> · ${item.createdAt ? new Date(item.createdAt).toLocaleString() : ''}`;
+        const intro = document.createElement('div');
+        intro.className = 'intro'; intro.textContent = item.intro || 'Open to read this message';
+        btn.append(subject, from, intro);
+        btn.addEventListener('click', () => openMessage(item.id));
+        $('messages').append(btn);
+      }
+      if (!quiet) status('Inbox updated.');
+    } catch (e) {
+      if (!quiet) status(e.message, true);
+    }
+  }
+  async function openMessage(id) {
+    if (!account) return;
+    try {
+      status('Opening message…');
+      const msg = await request('/messages/' + encodeURIComponent(id));
+      $('mailSubject').textContent = msg.subject || '(No subject)';
+      $('mailMeta').textContent = `From: ${msg.from?.address || 'unknown'} · ${msg.createdAt ? new Date(msg.createdAt).toLocaleString() : ''}`;
+      // Display as plain text to avoid executing untrusted email HTML.
+      let body = msg.text || '';
+      if (!body && Array.isArray(msg.html)) body = msg.html.join('\n').replace(/<[^>]*>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+      $('bodyText').textContent = body || 'No readable text body was provided.';
+      $('reader').style.display = 'block';
+      $('reader').scrollIntoView({behavior:'smooth',block:'start'});
+      status('Message opened.');
+    } catch (e) { status(e.message, true); }
+  }
+  async function deleteInbox() {
+    if (!account || busy) return;
+    if (!confirm('Delete this temporary inbox and clear its saved credentials from this browser?')) return;
+    setBusy(true);
+    try {
+      await request('/accounts/' + encodeURIComponent(account.id || 'me'), {method:'DELETE'});
+      account = null; saveAccount(); stopPolling();
+      $('messages').innerHTML = '<div class="empty">Your inbox is empty.</div>';
+      $('count').textContent = '0 messages';
+      $('reader').style.display = 'none';
+      status('Inbox deleted.');
+    } catch (e) {
+      // Clear local access even if provider deletion is unavailable.
+      account = null; saveAccount(); stopPolling();
+      status('Local inbox credentials cleared. Provider deletion may not have completed: ' + e.message, true);
+    } finally { setBusy(false); updateControls(); }
+  }
+  $('createBtn').addEventListener('click', createInbox);
+  $('refreshBtn').addEventListener('click', () => loadMessages(false));
+  $('copyBtn').addEventListener('click', async () => {
+    if (!account) return;
+    try { await navigator.clipboard.writeText(account.address); status('Email address copied.'); }
+    catch (_) { status('Copy was blocked by this browser. Select and copy the address manually.', true); }
+  });
+  $('deleteBtn').addEventListener('click', deleteInbox);
+  $('backBtn').addEventListener('click', () => { $('reader').style.display = 'none'; });
+  try {
+    const saved = localStorage.getItem('quickinbox-account');
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (parsed.address && parsed.password && parsed.token) {
+        account = parsed; updateControls(); status('Restored your saved inbox. Loading messages…');
+        startPolling(); loadMessages(true);
+      }
+    }
+  } catch (_) { localStorage.removeItem('quickinbox-account'); }
+  updateControls();
+  if ('serviceWorker' in navigator && location.protocol.startsWith('http')) {
+    window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
+  }
+})();
+</script>
+</body>
+</html>
